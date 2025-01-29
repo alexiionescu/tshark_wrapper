@@ -1,5 +1,5 @@
 use chrono::{NaiveDateTime, TimeZone as _, Utc};
-use clap::{Parser, Subcommand, command};
+use clap::{command, Parser, Subcommand};
 use regex::Regex;
 use std::process::Stdio;
 use tokio::{
@@ -73,7 +73,7 @@ async fn main() {
         tshark_args.push("-d");
         tshark_args.push(d.as_str());
     }
-    let analyzer = create_analyzer(&args);
+    let mut analyzer = create_analyzer(&args);
     match &args.cmd {
         ArgsCommand::Dump { output_regex: _ } => {
             tshark_args.push("-t");
@@ -110,7 +110,7 @@ async fn main() {
             line = lines.next_line() => {
                 match line {
                     Ok(Some(line)) => {
-                        process_line(line, &args.cmd, &analyzer);
+                        process_line(line, &args.cmd, &mut analyzer);
                     }
                     Err(e) => {
                         eprintln!("error reading line: {}", e);
@@ -124,7 +124,10 @@ async fn main() {
             _ = signal::ctrl_c() => {
                 eprintln!("ctrl-c received");
                 while let Ok(Some(line)) = lines.next_line().await {
-                    process_line(line, &args.cmd, &analyzer);
+                    process_line(line, &args.cmd, &mut analyzer);
+                }
+                if let Some(analyzer) = &mut analyzer {
+                    analyzer.end();
                 }
                 cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
                 cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
@@ -185,7 +188,11 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) {
     }
 }
 
-fn process_line(line: String, cmd_args: &ArgsCommand, analyzer: &Option<impl ProtocolAnalyzer>) {
+fn process_line(
+    line: String,
+    cmd_args: &ArgsCommand,
+    analyzer: &mut Option<impl ProtocolAnalyzer>,
+) {
     match cmd_args {
         ArgsCommand::Dump { output_regex } => {
             if let Some(re) = output_regex {
@@ -200,7 +207,7 @@ fn process_line(line: String, cmd_args: &ArgsCommand, analyzer: &Option<impl Pro
     }
 }
 
-fn analyze_line(line: &str, _cmd_args: &ArgsCommand, analyzer: &Option<impl ProtocolAnalyzer>) {
+fn analyze_line(line: &str, _cmd_args: &ArgsCommand, analyzer: &mut Option<impl ProtocolAnalyzer>) {
     let split_out = line.split('\t').collect::<Vec<&str>>();
     let dt = NaiveDateTime::parse_from_str(split_out[0], "%s.%6f")
         .map(|d| Utc.from_utc_datetime(&d))

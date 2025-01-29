@@ -26,5 +26,6 @@ where
 {
     fn add_protocol_fields(&self, tshark_args: &mut Vec<&str>);
     fn new(cmd_args: &ArgsCommand) -> Self;
-    fn analyze(&self, ts: DateTime<Utc>, cols: Vec<&str>);
+    fn analyze(&mut self, ts: DateTime<Utc>, cols: Vec<&str>);
+    fn end(&mut self);
 }
