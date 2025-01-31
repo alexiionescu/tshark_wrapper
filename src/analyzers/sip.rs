@@ -10,8 +10,17 @@ struct RegRequest {
 }
 
 #[derive(Default)]
+struct RegisterStatus {
+    last_ts: DateTime<Utc>,
+    expires: u16,
+    last_error_code: u16,
+    repeat_count: u16,
+}
+
+#[derive(Default)]
 pub struct Analyzer {
     register_req: HashMap<(String, u16), RegRequest>,
+    register_status: HashMap<String, RegisterStatus>,
 }
 
 const TIME_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -63,16 +72,96 @@ impl ProtocolAnalyzer for Analyzer {
                             }
                         }
                         if expires == 0 {
-                            write!(output, "{status_code:03}/OK      UNREGISTERED").unwrap();
+                            println!("{output}{status_code:03}/OK      UNREGISTERED");
+                        }
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            if status.expires != expires
+                                || status.last_error_code != status_code
+                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                            {
+                                status.expires = expires;
+                                status.last_error_code = status_code;
+                                status.last_ts = ts;
+                                status.repeat_count = 0;
+                                if expires != 0 {
+                                    println!(
+                                        "{output}{status_code:03}/OK      Expires:{expires} ({})",
+                                        status.repeat_count
+                                    );
+                                }
+                            } else {
+                                status.repeat_count += 1;
+                            }
                         } else {
-                            write!(output, "{status_code:03}/OK      Expires:{expires}").unwrap();
+                            if expires != 0 {
+                                println!("{output}{status_code:03}/OK      Expires:{expires}");
+                            }
+                            self.register_status.insert(
+                                key.0.clone(),
+                                RegisterStatus {
+                                    last_ts: ts,
+                                    expires,
+                                    last_error_code: status_code,
+                                    ..Default::default()
+                                },
+                            );
                         }
                     }
                     300..400 => {
-                        write!(output, "{status_code:03}/Redirect").unwrap();
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            if status.last_error_code != status_code
+                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                            {
+                                status.last_error_code = status_code;
+                                status.last_ts = ts;
+                                status.repeat_count = 0;
+                                println!(
+                                    "{output}{status_code:03}/Redirect ({})",
+                                    status.repeat_count
+                                );
+                            } else {
+                                status.repeat_count += 1;
+                            }
+                        } else {
+                            println!("{output}{status_code:03}/Redirect");
+                            self.register_status.insert(
+                                key.0.clone(),
+                                RegisterStatus {
+                                    last_ts: ts,
+                                    expires: 0,
+                                    last_error_code: status_code,
+                                    ..Default::default()
+                                },
+                            );
+                        }
                     }
                     400 | 402..407 | 408..500 => {
-                        write!(output, "{status_code:03}/Error").unwrap();
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            if status.last_error_code != status_code
+                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                            {
+                                status.last_error_code = status_code;
+                                status.last_ts = ts;
+                                status.repeat_count = 0;
+                                println!(
+                                    "{output}{status_code:03}/Error ({})",
+                                    status.repeat_count
+                                );
+                            } else {
+                                status.repeat_count += 1;
+                            }
+                        } else {
+                            println!("{output}{status_code:03}/Error");
+                            self.register_status.insert(
+                                key.0.clone(),
+                                RegisterStatus {
+                                    last_ts: ts,
+                                    expires: 0,
+                                    last_error_code: status_code,
+                                    ..Default::default()
+                                },
+                            );
+                        }
                     }
                     0 => {
                         self.cleanup_old_register_req(ts);
@@ -80,19 +169,43 @@ impl ProtocolAnalyzer for Analyzer {
                         if let Some(req) = self.register_req.get(&key) {
                             let diff = ts.signed_duration_since(req.ts);
                             if diff.num_seconds() > 20 {
-                                println!("{}408/Timeout {} s", output, diff.num_seconds());
+                                if let Some(status) = self.register_status.get_mut(&key.0) {
+                                    if status.expires != 0 || status.last_error_code != 408 || {
+                                        ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                                    } {
+                                        status.last_error_code = 408;
+                                        status.last_ts = ts;
+                                        status.expires = 0;
+                                        status.repeat_count = 0;
+                                        println!(
+                                            "{output}408/Timeout {} s ({})",
+                                            diff.num_seconds(),
+                                            status.repeat_count
+                                        );
+                                    } else {
+                                        status.repeat_count += 1;
+                                    }
+                                } else {
+                                    println!("{output}408/Timeout {} s", diff.num_seconds());
+                                    self.register_status.insert(
+                                        key.0.clone(),
+                                        RegisterStatus {
+                                            last_ts: ts,
+                                            expires: 0,
+                                            last_error_code: 408,
+                                            ..Default::default()
+                                        },
+                                    );
+                                }
                             }
                         } else {
                             self.register_req.insert(key, RegRequest { ts, expires });
                         }
                         return;
                     }
-                    401 | 407 => {
-                        self.register_req.remove(&key);
-                        return;
-                    }
+                    401 | 407 => {}
                     _ => {
-                        write!(output, "{status_code:03}/Unknown").unwrap();
+                        println!("{output}{status_code:03}/Unknown");
                     }
                 }
                 self.register_req.remove(&key);
@@ -109,16 +222,16 @@ impl ProtocolAnalyzer for Analyzer {
                 if !sdp_addr.is_empty() {
                     write!(output, " MEDIA {sdp_addr}:{sdp_port} ").unwrap();
                 }
+                println!("{output}");
             }
             _ => {
                 if status_code > 0 {
-                    write!(output, "<<-{to_user:>8} {status_code:03} CID:{call_id}").unwrap();
+                    println!("{output}<<-{to_user:>8} {status_code:03} CID:{call_id}");
                 } else {
-                    write!(output, "->>{to_user:>8} REQ CID:{call_id}").unwrap();
+                    println!("{output}->>{to_user:>8} REQ CID:{call_id}");
                 }
             }
         }
-        println!("{}", output);
     }
 
     fn add_protocol_fields(&self, tshark_args: &mut Vec<&str>) {
