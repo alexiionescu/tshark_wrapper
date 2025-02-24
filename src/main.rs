@@ -126,14 +126,14 @@ async fn main() {
                 while let Ok(Some(line)) = lines.next_line().await {
                     process_line(line, &args.cmd, &mut analyzer);
                 }
-                if let Some(analyzer) = &mut analyzer {
-                    analyzer.end();
-                }
                 cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
                 cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
                 break;
             }
         }
+    }
+    if let Some(analyzer) = &mut analyzer {
+        analyzer.end();
     }
 }
 

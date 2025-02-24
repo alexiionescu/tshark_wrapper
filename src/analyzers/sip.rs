@@ -1,20 +1,28 @@
 use super::ProtocolAnalyzer;
 use crate::ArgsCommand;
 use ahash::HashMap;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use std::fmt::Write as _;
 
 struct RegRequest {
     ts: DateTime<Utc>,
     expires: u16,
+    auth_user: Option<String>,
 }
 
 #[derive(Default)]
 struct RegisterStatus {
-    last_ts: DateTime<Utc>,
+    from_addr: String,
+    last_reported_ts: DateTime<Utc>,
+    last_seen_ts: DateTime<Utc>,
     expires: u16,
     last_error_code: u16,
     repeat_count: u16,
+    udp_streams: HashMap<u32, DateTime<Utc>>,
+    last_stream: u32,
+    errors: u32,
+    last_error_ts: Option<DateTime<Utc>>,
+    error_minutes: i64,
 }
 
 #[derive(Default)]
@@ -32,6 +40,35 @@ impl Analyzer {
             diff.num_seconds() < 180
         });
     }
+
+    fn verified_expired_sessions(&mut self, ts: DateTime<Utc>) {
+        for (user, status) in self
+            .register_status
+            .iter_mut()
+            .filter(|(_, s)| s.expires > 0)
+        {
+            if (ts - status.last_seen_ts).num_seconds() > status.expires.into() {
+                println!(
+                    "{} REGISTER {user:<10} EXPIRED!!!  {} seconds ({})",
+                    ts.with_timezone(&Local).format(TIME_FMT),
+                    status.expires,
+                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
+                );
+                status.expires = 0;
+                status.repeat_count = 0;
+                status.last_error_code = 0;
+                status.udp_streams.clear();
+                status.errors += 1;
+                if status.last_error_ts.is_none() {
+                    status.last_error_ts = Some(ts);
+                }
+            } else {
+                status
+                    .udp_streams
+                    .retain(|_, last_seen| (ts - *last_seen).num_seconds() < status.expires.into());
+            }
+        }
+    }
 }
 
 impl ProtocolAnalyzer for Analyzer {
@@ -40,8 +77,8 @@ impl ProtocolAnalyzer for Analyzer {
     }
 
     fn analyze(&mut self, ts: DateTime<Utc>, cols: Vec<&str>) {
-        let _from_addr = cols[0];
-        let _to_addr = cols[1];
+        let from_addr = cols[0];
+        let to_addr = cols[1];
         let from_user = cols[2];
         let _from_host = cols[3];
         let to_user = cols[4];
@@ -53,11 +90,14 @@ impl ProtocolAnalyzer for Analyzer {
         let sdp_port = cols[11];
         let call_id = cols[12];
         let from_display = cols[13];
+        let udp_stream = cols[14].parse::<u32>().unwrap_or_default();
+        let auth_user = cols[15];
         let mut output = String::with_capacity(200);
+        self.verified_expired_sessions(ts);
         write!(
             output,
             "{} {method:<8} {from_user:<10} ",
-            ts.format(TIME_FMT)
+            ts.with_timezone(&Local).format(TIME_FMT)
         )
         .unwrap();
         match method {
@@ -75,33 +115,64 @@ impl ProtocolAnalyzer for Analyzer {
                             println!("{output}{status_code:03}/OK      UNREGISTERED");
                         }
                         if let Some(status) = self.register_status.get_mut(&key.0) {
-                            if status.expires != expires
+                            if status.last_error_code == 401 {
+                                status.last_error_code = status_code;
+                            }
+                            status.last_seen_ts = ts;
+
+                            let mut from_changed = false;
+                            if expires != 0 && to_addr != status.from_addr {
+                                from_changed = true;
+                                status.from_addr = to_addr.into();
+                            }
+                            status.last_stream = udp_stream;
+                            if status.udp_streams.insert(udp_stream, ts).is_none()
+                                || status.expires != expires
                                 || status.last_error_code != status_code
-                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                                || from_changed
+                                || status.last_error_ts.is_some()
+                                || ts
+                                    .signed_duration_since(status.last_reported_ts)
+                                    .num_hours()
+                                    >= 1
                             {
                                 status.expires = expires;
                                 status.last_error_code = status_code;
-                                status.last_ts = ts;
+                                status.last_reported_ts = ts;
                                 status.repeat_count = 0;
                                 if expires != 0 {
-                                    println!(
-                                        "{output}{status_code:03}/OK      Expires:{expires} ({})",
-                                        status.repeat_count
-                                    );
+                                    if let Some(err_ts) = status.last_error_ts.take() {
+                                        let err_time = (ts - err_ts).num_minutes();
+                                        println!(
+                                            "{output}{status_code:03}/OK      Expires:{expires:4} ({:2},{udp_stream:4}) {:<15} Last Error: {} minutes.",
+                                            status.repeat_count, status.from_addr, err_time
+                                        );
+                                        status.error_minutes += err_time;
+                                    } else {
+                                        println!(
+                                            "{output}{status_code:03}/OK      Expires:{expires:4} ({:2},{udp_stream:4}) {:<15}",
+                                            status.repeat_count, status.from_addr
+                                        );
+                                    }
                                 }
                             } else {
                                 status.repeat_count += 1;
                             }
                         } else {
                             if expires != 0 {
-                                println!("{output}{status_code:03}/OK      Expires:{expires}");
+                                println!("{output}{status_code:03}/OK      Expires:{expires:4} ( F,{udp_stream:4}) {:<15}",to_addr);
                             }
                             self.register_status.insert(
                                 key.0.clone(),
                                 RegisterStatus {
-                                    last_ts: ts,
+                                    from_addr: to_addr.into(),
+                                    last_reported_ts: ts,
+                                    last_seen_ts: ts,
                                     expires,
                                     last_error_code: status_code,
+                                    udp_streams: HashMap::from_iter(std::iter::once((
+                                        udp_stream, ts,
+                                    ))),
                                     ..Default::default()
                                 },
                             );
@@ -109,11 +180,15 @@ impl ProtocolAnalyzer for Analyzer {
                     }
                     300..400 => {
                         if let Some(status) = self.register_status.get_mut(&key.0) {
+                            status.last_seen_ts = ts;
                             if status.last_error_code != status_code
-                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                                || ts
+                                    .signed_duration_since(status.last_reported_ts)
+                                    .num_hours()
+                                    >= 1
                             {
                                 status.last_error_code = status_code;
-                                status.last_ts = ts;
+                                status.last_reported_ts = ts;
                                 status.repeat_count = 0;
                                 println!(
                                     "{output}{status_code:03}/Redirect ({})",
@@ -127,9 +202,14 @@ impl ProtocolAnalyzer for Analyzer {
                             self.register_status.insert(
                                 key.0.clone(),
                                 RegisterStatus {
-                                    last_ts: ts,
+                                    from_addr: to_addr.into(),
+                                    last_reported_ts: ts,
+                                    last_seen_ts: ts,
                                     expires: 0,
                                     last_error_code: status_code,
+                                    udp_streams: HashMap::from_iter(std::iter::once((
+                                        udp_stream, ts,
+                                    ))),
                                     ..Default::default()
                                 },
                             );
@@ -137,12 +217,20 @@ impl ProtocolAnalyzer for Analyzer {
                     }
                     400 | 402..407 | 408..500 => {
                         if let Some(status) = self.register_status.get_mut(&key.0) {
+                            status.last_seen_ts = ts;
                             if status.last_error_code != status_code
-                                || ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                                || ts
+                                    .signed_duration_since(status.last_reported_ts)
+                                    .num_hours()
+                                    >= 1
                             {
                                 status.last_error_code = status_code;
-                                status.last_ts = ts;
+                                status.last_reported_ts = ts;
                                 status.repeat_count = 0;
+                                status.errors += 1;
+                                if status.last_error_ts.is_none() {
+                                    status.last_error_ts = Some(ts);
+                                }
                                 println!(
                                     "{output}{status_code:03}/Error ({})",
                                     status.repeat_count
@@ -155,8 +243,11 @@ impl ProtocolAnalyzer for Analyzer {
                             self.register_status.insert(
                                 key.0.clone(),
                                 RegisterStatus {
-                                    last_ts: ts,
+                                    from_addr: to_addr.into(),
+                                    last_reported_ts: ts,
+                                    last_seen_ts: ts,
                                     expires: 0,
+                                    errors: 1,
                                     last_error_code: status_code,
                                     ..Default::default()
                                 },
@@ -166,16 +257,25 @@ impl ProtocolAnalyzer for Analyzer {
                     0 => {
                         self.cleanup_old_register_req(ts);
 
-                        if let Some(req) = self.register_req.get(&key) {
+                        if let Some(req) = self.register_req.get_mut(&key) {
                             let diff = ts.signed_duration_since(req.ts);
+                            req.auth_user = (!auth_user.is_empty()).then_some(auth_user.into());
                             if diff.num_seconds() > 20 {
                                 if let Some(status) = self.register_status.get_mut(&key.0) {
+                                    status.last_seen_ts = ts;
                                     if status.expires != 0 || status.last_error_code != 408 || {
-                                        ts.signed_duration_since(status.last_ts).num_hours() >= 1
+                                        ts.signed_duration_since(status.last_reported_ts)
+                                            .num_hours()
+                                            >= 1
                                     } {
                                         status.last_error_code = 408;
-                                        status.last_ts = ts;
+                                        status.last_reported_ts = ts;
                                         status.expires = 0;
+                                        status.errors += 1;
+                                        if status.last_error_ts.is_none() {
+                                            status.last_error_ts = Some(ts);
+                                        }
+                                        status.udp_streams.remove(&udp_stream);
                                         status.repeat_count = 0;
                                         println!(
                                             "{output}408/Timeout {} s ({})",
@@ -186,12 +286,19 @@ impl ProtocolAnalyzer for Analyzer {
                                         status.repeat_count += 1;
                                     }
                                 } else {
-                                    println!("{output}408/Timeout {} s", diff.num_seconds());
+                                    println!(
+                                        "{output}408/Timeout {} s {:<15}",
+                                        diff.num_seconds(),
+                                        from_addr
+                                    );
                                     self.register_status.insert(
                                         key.0.clone(),
                                         RegisterStatus {
-                                            last_ts: ts,
+                                            from_addr: from_addr.into(),
+                                            last_reported_ts: ts,
+                                            last_seen_ts: ts,
                                             expires: 0,
+                                            errors: 1,
                                             last_error_code: 408,
                                             ..Default::default()
                                         },
@@ -199,12 +306,47 @@ impl ProtocolAnalyzer for Analyzer {
                                 }
                             }
                         } else {
-                            self.register_req.insert(key, RegRequest { ts, expires });
+                            self.register_req.insert(
+                                key,
+                                RegRequest {
+                                    ts,
+                                    expires,
+                                    auth_user: (!auth_user.is_empty()).then_some(auth_user.into()),
+                                },
+                            );
                         }
                         return;
                     }
-                    401 | 407 => {}
+                    407 => {
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            status.last_seen_ts = ts;
+                        }
+                    }
+                    401 => {
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            status.last_seen_ts = ts;
+                            if let Some(RegRequest {
+                                auth_user: Some(user_name),
+                                ..
+                            }) = self.register_req.get(&key)
+                            {
+                                if status.last_error_code == 401 && status.last_stream == udp_stream
+                                {
+                                    status.errors += 1;
+                                    if status.last_error_ts.is_none() {
+                                        status.last_error_ts = Some(ts);
+                                    }
+                                    println!("{output}401/Unauthorized {user_name}");
+                                }
+                            }
+                            status.last_stream = udp_stream;
+                            status.last_error_code = 401;
+                        }
+                    }
                     _ => {
+                        if let Some(status) = self.register_status.get_mut(&key.0) {
+                            status.last_seen_ts = ts;
+                        }
                         println!("{output}{status_code:03}/Unknown");
                     }
                 }
@@ -224,13 +366,14 @@ impl ProtocolAnalyzer for Analyzer {
                 }
                 println!("{output}");
             }
-            _ => {
+            m if !m.is_empty() => {
                 if status_code > 0 {
                     println!("{output}<<-{to_user:>8} {status_code:03} CID:{call_id}");
                 } else {
                     println!("{output}->>{to_user:>8} REQ CID:{call_id}");
                 }
             }
+            _ => (),
         }
     }
 
@@ -259,6 +402,10 @@ impl ProtocolAnalyzer for Analyzer {
         tshark_args.push("sip.Call-ID");
         tshark_args.push("-e");
         tshark_args.push("sip.from.display.info");
+        tshark_args.push("-e");
+        tshark_args.push("udp.stream");
+        tshark_args.push("-e");
+        tshark_args.push("sip.auth.username");
         if !tshark_args.contains(&"-Y") {
             tshark_args.push("-Y");
             tshark_args.push("sip");
@@ -270,9 +417,58 @@ impl ProtocolAnalyzer for Analyzer {
     }
 
     fn end(&mut self) {
+        println!("\n ------------ Register Status ------------ \n");
+        let mut keys = Vec::from_iter(self.register_status.keys());
+        keys.sort();
+        let mut registered = 0;
+        let mut total_errors = 0;
+        let mut total_errors_time = 0;
+        for user in keys {
+            let status = self.register_status.get(user).unwrap();
+            total_errors += status.errors;
+            total_errors_time += status.error_minutes;
+            if status.expires > 0 {
+                let mut output = String::with_capacity(200);
+                write!(
+                    output,
+                    "{user:10}: REGISTERED from {:<15} ({} errors for {} minutes)",
+                    status.from_addr, status.errors, status.error_minutes
+                )
+                .unwrap();
+                if status.udp_streams.len() > 1 {
+                    write!(output, "\t{} streams: ", status.udp_streams.len(),).unwrap();
+                    for ts in status.udp_streams.values() {
+                        write!(output, "{}, ", ts.with_timezone(&Local).format(TIME_FMT)).unwrap();
+                    }
+                } else {
+                    write!(
+                        output,
+                        "\tlast seen: {}",
+                        status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
+                    )
+                    .unwrap();
+                }
+                println!("{}", output);
+                registered += 1;
+            } else {
+                println!(
+                    "{user:10}: UNREGISTERED from {:<15} since {}",
+                    status.from_addr,
+                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
+                );
+            }
+        }
         println!(
-            "End of SIP analyzer\n - registered requests pending: {}",
-            self.register_req.len()
+            r#"
+--------- STATS -----------
+- total users registered: {registered}
+- total users un-registered: {}
+- total errors: {total_errors}
+- total errors time: {total_errors_time} minutes
+- registered requests pending: {}
+"#,
+            self.register_status.len() - registered,
+            self.register_req.len(),
         );
     }
 }
