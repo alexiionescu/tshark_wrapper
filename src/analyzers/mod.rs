@@ -9,7 +9,7 @@ pub fn create_analyzer(args: &Args) -> Option<impl ProtocolAnalyzer> {
         ArgsCommand::Analyzer => {
             if let Some(protocol) = args.protocol.as_deref() {
                 match protocol {
-                    "sip" => Some(sip::Analyzer::new(&args.cmd)),
+                    "sip" => Some(sip::Analyzer::new(&args.cmd, args.verbosity)),
                     _ => None,
                 }
             } else {
@@ -25,7 +25,7 @@ where
     Self: Sized,
 {
     fn add_protocol_fields(&self, tshark_args: &mut Vec<&str>);
-    fn new(cmd_args: &ArgsCommand) -> Self;
+    fn new(cmd_args: &ArgsCommand, verbosity: u8) -> Self;
     fn analyze(&mut self, ts: DateTime<Utc>, cols: Vec<&str>);
     fn end(&mut self);
 }

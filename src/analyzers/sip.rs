@@ -29,6 +29,7 @@ struct RegisterStatus {
 pub struct Analyzer {
     register_req: HashMap<(String, u16), RegRequest>,
     register_status: HashMap<String, RegisterStatus>,
+    verbosity: u8,
 }
 
 const TIME_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -72,8 +73,11 @@ impl Analyzer {
 }
 
 impl ProtocolAnalyzer for Analyzer {
-    fn new(_cmd_args: &ArgsCommand) -> Self {
-        Analyzer::default()
+    fn new(_cmd_args: &ArgsCommand, verbosity: u8) -> Self {
+        Self {
+            verbosity,
+            ..Default::default()
+        }
     }
 
     fn analyze(&mut self, ts: DateTime<Utc>, cols: Vec<&str>) {
@@ -417,7 +421,11 @@ impl ProtocolAnalyzer for Analyzer {
     }
 
     fn end(&mut self) {
+        let mut output = String::with_capacity(200);
         println!("\n ------------ Register Status ------------ \n");
+        if self.verbosity > 1 {
+            eprintln!("\n ------------ Register Status ------------ \n");
+        }
         let mut keys = Vec::from_iter(self.register_status.keys());
         keys.sort();
         let mut registered = 0;
@@ -427,38 +435,40 @@ impl ProtocolAnalyzer for Analyzer {
             let status = self.register_status.get(user).unwrap();
             total_errors += status.errors;
             total_errors_time += status.error_minutes;
-            if status.expires > 0 {
-                let mut output = String::with_capacity(200);
+
+            let registered = if status.expires > 0 {
+                registered += 1;
+                "REGISTERED"
+            } else {
+                "UNREGISTERED"
+            };
+            write!(
+                output,
+                "{user:12} {registered:12} from {:<15}\t{:3} errors for {:4} minutes",
+                status.from_addr, status.errors, status.error_minutes
+            )
+            .unwrap();
+            if status.udp_streams.len() > 1 {
+                write!(output, "\t{} streams: ", status.udp_streams.len(),).unwrap();
+                for ts in status.udp_streams.values() {
+                    write!(output, "{}, ", ts.with_timezone(&Local).format(TIME_FMT)).unwrap();
+                }
+            } else {
                 write!(
                     output,
-                    "{user:10}: REGISTERED from {:<15} ({} errors for {} minutes)",
-                    status.from_addr, status.errors, status.error_minutes
+                    "\tlast seen: {}",
+                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
                 )
                 .unwrap();
-                if status.udp_streams.len() > 1 {
-                    write!(output, "\t{} streams: ", status.udp_streams.len(),).unwrap();
-                    for ts in status.udp_streams.values() {
-                        write!(output, "{}, ", ts.with_timezone(&Local).format(TIME_FMT)).unwrap();
-                    }
-                } else {
-                    write!(
-                        output,
-                        "\tlast seen: {}",
-                        status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
-                    )
-                    .unwrap();
-                }
-                println!("{}", output);
-                registered += 1;
-            } else {
-                println!(
-                    "{user:10}: UNREGISTERED from {:<15} since {}",
-                    status.from_addr,
-                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
-                );
             }
+            println!("{}", output);
+            if self.verbosity > 1 {
+                eprintln!("{}", output);
+            }
+            output.clear();
         }
-        println!(
+        writeln!(
+            output,
             r#"
 --------- STATS -----------
 - total users registered: {registered}
@@ -469,6 +479,11 @@ impl ProtocolAnalyzer for Analyzer {
 "#,
             self.register_status.len() - registered,
             self.register_req.len(),
-        );
+        )
+        .unwrap();
+        println!("{}", output);
+        if self.verbosity > 0 {
+            eprintln!("{}", output);
+        }
     }
 }

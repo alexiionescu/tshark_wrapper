@@ -1,13 +1,15 @@
 use chrono::{NaiveDateTime, TimeZone as _, Utc};
-use clap::{command, Parser, Subcommand};
+use clap::{command, ArgAction, Parser, Subcommand};
+use glob::glob;
 use regex::Regex;
-use std::process::Stdio;
+use std::{path::PathBuf, process::Stdio};
 use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
     process::Command,
     signal,
 };
 
+mod utils;
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -24,6 +26,8 @@ struct Args {
     decode_as: Option<String>,
     #[clap(short = 'p', help = "protocol")]
     protocol: Option<String>,
+    #[clap(short = 'v', action = ArgAction::Count, help = "verbosity level (e.g. -vvv)")]
+    verbosity: u8,
 }
 
 mod analyzers;
@@ -57,10 +61,15 @@ async fn main() {
         tshark_args.push("-Y");
         tshark_args.push(f.as_str());
     }
-    if let Some(f) = args.read_file.as_ref() {
+    let mut read_idx = 0;
+    let paths = if let Some(f) = args.read_file.as_ref() {
         tshark_args.push("-r");
-        tshark_args.push(f.as_str());
-    }
+        tshark_args.push("");
+        read_idx = tshark_args.len() - 1;
+        Vec::from_iter(glob(f).expect("Invalid File glob pattern").flatten())
+    } else {
+        vec![PathBuf::default()]
+    };
     if let Some(f) = args.interface.as_ref() {
         tshark_args.push("-i");
         tshark_args.push(f.as_str());
@@ -92,43 +101,54 @@ async fn main() {
         }
     }
 
-    eprintln!("tshark '{}'", tshark_args.join("' '"));
+    for path in paths {
+        let mut tshark_args = tshark_args.clone();
+        if read_idx > 0 {
+            tshark_args[read_idx] = path
+                .as_os_str()
+                .to_str()
+                .expect("Invalid non-unicode path string");
+        }
+        if args.verbosity > 2 {
+            eprintln!("tshark '{}'", tshark_args.join("' '"));
+        }
 
-    let mut cmd = Command::new("tshark")
-        .args(tshark_args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("cannot spawn");
+        let mut cmd = Command::new("tshark")
+            .args(tshark_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cannot spawn");
 
-    let stdout = cmd.stdout.take().expect("no process stdout");
+        let stdout = cmd.stdout.take().expect("no process stdout");
 
-    let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::new(stdout).lines();
 
-    loop {
-        tokio::select! {
-            line = lines.next_line() => {
-                match line {
-                    Ok(Some(line)) => {
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    match line {
+                        Ok(Some(line)) => {
+                            process_line(line, &args.cmd, &mut analyzer);
+                        }
+                        Err(e) => {
+                            eprintln!("error reading line: {}", e);
+                            break;
+                        }
+                        _ => {
+                            break;
+                        }
+                    }
+                }
+                _ = signal::ctrl_c() => {
+                    eprintln!("ctrl-c received");
+                    while let Ok(Some(line)) = lines.next_line().await {
                         process_line(line, &args.cmd, &mut analyzer);
                     }
-                    Err(e) => {
-                        eprintln!("error reading line: {}", e);
-                        break;
-                    }
-                    _ => {
-                        break;
-                    }
+                    cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
+                    cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
+                    break;
                 }
-            }
-            _ = signal::ctrl_c() => {
-                eprintln!("ctrl-c received");
-                while let Ok(Some(line)) = lines.next_line().await {
-                    process_line(line, &args.cmd, &mut analyzer);
-                }
-                cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
-                cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
-                break;
             }
         }
     }
