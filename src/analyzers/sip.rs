@@ -1,7 +1,7 @@
 use super::ProtocolAnalyzer;
 use crate::ArgsCommand;
 use ahash::HashMap;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Datelike, Local, Utc};
 use std::fmt::Write as _;
 
 struct RegRequest {
@@ -30,6 +30,7 @@ pub struct Analyzer {
     register_req: HashMap<(String, u16), RegRequest>,
     register_status: HashMap<String, RegisterStatus>,
     verbosity: u8,
+    last_reported_ts: Option<DateTime<Utc>>,
 }
 
 const TIME_FMT: &str = "%Y-%m-%d %H:%M:%S%.3f";
@@ -70,6 +71,93 @@ impl Analyzer {
             }
         }
     }
+
+    fn print_stats(&self, opt_ts: Option<DateTime<Utc>>) {
+        let mut output = String::with_capacity(200);
+        if let Some(ts) = opt_ts {
+            println!(
+                "\n------------ Daily Report at {} ------------ \n",
+                ts.with_timezone(&Local).format(TIME_FMT)
+            );
+            if self.verbosity > 1 {
+                eprintln!(
+                    "\n------------ Daily Report at {} ------------ \n",
+                    ts.with_timezone(&Local).format(TIME_FMT)
+                );
+            }
+        } else {
+            println!("\n------------ Final Report ------------ \n");
+            if self.verbosity > 1 {
+                eprintln!("\n------------ Final Report ------------ \n");
+            }
+        }
+        println!(" ------------ Register Status ------------ \n");
+        if self.verbosity > 1 {
+            eprintln!(" ------------ Register Status ------------ \n");
+        }
+        let mut keys = Vec::from_iter(self.register_status.keys());
+        keys.sort();
+        let mut registered = 0;
+        let mut total_errors = 0;
+        let mut total_errors_time = 0;
+        for user in keys {
+            let status = self.register_status.get(user).unwrap();
+            total_errors += status.errors;
+            total_errors_time += status.error_minutes;
+
+            let registered = if status.expires > 0 {
+                registered += 1;
+                "REGISTERED"
+            } else {
+                "UNREGISTERED"
+            };
+            write!(
+                output,
+                "{user:12} {registered:12} from {:<15}\t{:3} errors for {:4} minutes",
+                status.from_addr, status.errors, status.error_minutes
+            )
+            .unwrap();
+            if status.udp_streams.len() > 1 {
+                write!(output, "\t{} streams: ", status.udp_streams.len(),).unwrap();
+                for ts in status.udp_streams.values() {
+                    write!(output, "{}, ", ts.with_timezone(&Local).format(TIME_FMT)).unwrap();
+                }
+            } else {
+                write!(
+                    output,
+                    "\tlast seen: {}",
+                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
+                )
+                .unwrap();
+            }
+            println!("{}", output);
+            if self.verbosity > 1 {
+                eprintln!("{}", output);
+            }
+            output.clear();
+        }
+        writeln!(
+            output,
+            r#"
+ ------------ STATS ------------
+
+- total users registered: {registered}
+- total users un-registered: {}
+- total errors: {total_errors}
+- total errors time: {total_errors_time} minutes
+"#,
+            self.register_status.len() - registered,
+        )
+        .unwrap();
+        print!("{}", output);
+        if self.verbosity > 0 {
+            eprint!("{}", output);
+        }
+        println!("----------------------------------\n");
+        if self.verbosity > 1 {
+            eprintln!("----------------------------------\n");
+        }
+    }
 }
 
 impl ProtocolAnalyzer for Analyzer {
@@ -98,6 +186,12 @@ impl ProtocolAnalyzer for Analyzer {
         let auth_user = cols[15];
         let mut output = String::with_capacity(200);
         self.verified_expired_sessions(ts);
+        if self.last_reported_ts.is_none() {
+            self.last_reported_ts = Some(ts);
+        } else if ts.day() != self.last_reported_ts.unwrap().day() {
+            self.print_stats(Some(ts));
+            self.last_reported_ts = Some(ts);
+        }
         write!(
             output,
             "{} {method:<8} {from_user:<10} ",
@@ -421,69 +515,6 @@ impl ProtocolAnalyzer for Analyzer {
     }
 
     fn end(&mut self) {
-        let mut output = String::with_capacity(200);
-        println!("\n ------------ Register Status ------------ \n");
-        if self.verbosity > 1 {
-            eprintln!("\n ------------ Register Status ------------ \n");
-        }
-        let mut keys = Vec::from_iter(self.register_status.keys());
-        keys.sort();
-        let mut registered = 0;
-        let mut total_errors = 0;
-        let mut total_errors_time = 0;
-        for user in keys {
-            let status = self.register_status.get(user).unwrap();
-            total_errors += status.errors;
-            total_errors_time += status.error_minutes;
-
-            let registered = if status.expires > 0 {
-                registered += 1;
-                "REGISTERED"
-            } else {
-                "UNREGISTERED"
-            };
-            write!(
-                output,
-                "{user:12} {registered:12} from {:<15}\t{:3} errors for {:4} minutes",
-                status.from_addr, status.errors, status.error_minutes
-            )
-            .unwrap();
-            if status.udp_streams.len() > 1 {
-                write!(output, "\t{} streams: ", status.udp_streams.len(),).unwrap();
-                for ts in status.udp_streams.values() {
-                    write!(output, "{}, ", ts.with_timezone(&Local).format(TIME_FMT)).unwrap();
-                }
-            } else {
-                write!(
-                    output,
-                    "\tlast seen: {}",
-                    status.last_seen_ts.with_timezone(&Local).format(TIME_FMT)
-                )
-                .unwrap();
-            }
-            println!("{}", output);
-            if self.verbosity > 1 {
-                eprintln!("{}", output);
-            }
-            output.clear();
-        }
-        writeln!(
-            output,
-            r#"
---------- STATS -----------
-- total users registered: {registered}
-- total users un-registered: {}
-- total errors: {total_errors}
-- total errors time: {total_errors_time} minutes
-- registered requests pending: {}
-"#,
-            self.register_status.len() - registered,
-            self.register_req.len(),
-        )
-        .unwrap();
-        println!("{}", output);
-        if self.verbosity > 0 {
-            eprintln!("{}", output);
-        }
+        self.print_stats(None);
     }
 }
