@@ -8,6 +8,7 @@ use tokio::{
     process::Command,
     signal,
 };
+use utils::str::MaybeReplaceVecExt as _;
 
 mod utils;
 #[derive(Parser)]
@@ -235,6 +236,14 @@ fn process_line(
                 if split_out.len() <= data_field {
                     line
                 } else if let Ok(raw_hex) = hex::decode(split_out[data_field]) {
+                    let raw_hex = raw_hex
+                        .maybe_replace_buf(b"\r", b"<CR>")
+                        .maybe_replace_buf(b"\n", b"<LF>")
+                        .maybe_replace_buf(b"\t", b"<TAB>")
+                        .maybe_replace_buf(b"\x00", b"<NUL>")
+                        .maybe_replace_buf(b"\x02", b"<STX>")
+                        .maybe_replace_buf(b"\x03", b"<ETX>")
+                        .maybe_replace_buf(b"\x04", b"<EOT>");
                     if let Ok(s) = String::from_utf8(raw_hex) {
                         split_out[data_field] = &s;
                         split_out.join("\t")
