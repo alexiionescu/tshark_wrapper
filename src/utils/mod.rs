@@ -2,6 +2,7 @@
 use std::path::Path;
 
 use regex::Regex;
+pub(crate) mod str;
 
 pub(crate) fn get_path_suffix(path: &Path, delimiter: char) -> Option<&str> {
     let file_name = path.file_name()?.to_str()?;

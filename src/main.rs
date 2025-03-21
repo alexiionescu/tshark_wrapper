@@ -37,10 +37,13 @@ enum ArgsCommand {
     Dump {
         #[clap(short = 'e', long, help = "Regex for filtering output lines")]
         output_regex: Option<Regex>,
+        #[clap(short = 't', long, help = "Decoda Data As Text")]
+        text: bool,
     },
     Analyzer,
 }
 
+const FIX_FIELDS: usize = 3;
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
@@ -83,11 +86,12 @@ async fn main() {
         tshark_args.push(d.as_str());
     }
     let mut analyzer = create_analyzer(&args);
+    let mut data_field = 0;
     match &args.cmd {
-        ArgsCommand::Dump { output_regex: _ } => {
+        ArgsCommand::Dump { .. } => {
             tshark_args.push("-t");
             tshark_args.push("ad");
-            add_dump_protocol_fields(&mut tshark_args, &args);
+            data_field = add_dump_protocol_fields(&mut tshark_args, &args);
         }
         ArgsCommand::Analyzer => {
             if let Some(analyzer) = &analyzer {
@@ -129,7 +133,7 @@ async fn main() {
                 line = lines.next_line() => {
                     match line {
                         Ok(Some(line)) => {
-                            process_line(line, &args.cmd, &mut analyzer);
+                            process_line(line, &args.cmd, &mut analyzer, data_field);
                         }
                         Err(e) => {
                             eprintln!("error reading line: {}", e);
@@ -143,7 +147,7 @@ async fn main() {
                 _ = signal::ctrl_c() => {
                     eprintln!("ctrl-c received");
                     while let Ok(Some(line)) = lines.next_line().await {
-                        process_line(line, &args.cmd, &mut analyzer);
+                        process_line(line, &args.cmd, &mut analyzer, data_field);
                     }
                     cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
                     cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
@@ -157,7 +161,7 @@ async fn main() {
     }
 }
 
-fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) {
+fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) -> usize {
     if let Some(protocol) = args.protocol.as_deref() {
         match protocol {
             "tcp" => {
@@ -167,12 +171,18 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) {
                 tshark_args.push("tcp.dstport");
                 tshark_args.push("-e");
                 tshark_args.push("_ws.col.Info");
+                tshark_args.push("-e");
+                tshark_args.push("data");
+                FIX_FIELDS + 3
             }
             "udp" => {
                 tshark_args.push("-e");
                 tshark_args.push("udp.srcport");
                 tshark_args.push("-e");
                 tshark_args.push("udp.dstport");
+                tshark_args.push("-e");
+                tshark_args.push("data");
+                FIX_FIELDS + 2
             }
             "sip" => {
                 tshark_args.push("-e");
@@ -199,12 +209,16 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) {
                     tshark_args.push("-f");
                     tshark_args.push("udp port 5060");
                 }
+                0
             }
             _ => {
                 tshark_args.push("-e");
                 tshark_args.push("_ws.col.Info");
+                0
             }
         }
+    } else {
+        0
     }
 }
 
@@ -212,9 +226,27 @@ fn process_line(
     line: String,
     cmd_args: &ArgsCommand,
     analyzer: &mut Option<impl ProtocolAnalyzer>,
+    data_field: usize,
 ) {
     match cmd_args {
-        ArgsCommand::Dump { output_regex } => {
+        ArgsCommand::Dump { output_regex, text } => {
+            let line = if *text && data_field > 0 {
+                let mut split_out = line.split('\t').collect::<Vec<&str>>();
+                if split_out.len() <= data_field {
+                    line
+                } else if let Ok(raw_hex) = hex::decode(split_out[data_field]) {
+                    if let Ok(s) = String::from_utf8(raw_hex) {
+                        split_out[data_field] = &s;
+                        split_out.join("\t")
+                    } else {
+                        line
+                    }
+                } else {
+                    line
+                }
+            } else {
+                line
+            };
             if let Some(re) = output_regex {
                 if re.is_match(&line) {
                     println!("{}", line);
