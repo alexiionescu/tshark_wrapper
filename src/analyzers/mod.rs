@@ -4,7 +4,7 @@ use crate::{Args, ArgsCommand};
 
 mod sip;
 
-pub fn create_analyzer(args: &Args) -> Option<impl ProtocolAnalyzer> {
+pub fn create_analyzer(args: &Args) -> Option<impl ProtocolAnalyzer + use<>> {
     match &args.cmd {
         ArgsCommand::Analyzer => {
             if let Some(protocol) = args.protocol.as_deref() {

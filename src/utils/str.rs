@@ -122,6 +122,9 @@ mod test {
             .maybe_replace_buf(b"\x04", b"<EOT>")
             .maybe_replace_buf(b"\n", b"<LF>");
         let a = String::from_utf8(a).expect("decode utf8 ok");
-        assert_eq!(a,"<STX>102<CR><LF><NUL><NUL><NUL>102<ETX><EOT>\u{5}\u{6}\u{7}\u{8}<TAB><LF>\u{b}\u{c}<CR>\u{e}\u{f}\u{14}\u{15}\u{1a}\u{1b}\u{7f} 102");
+        assert_eq!(
+            a,
+            "<STX>102<CR><LF><NUL><NUL><NUL>102<ETX><EOT>\u{5}\u{6}\u{7}\u{8}<TAB><LF>\u{b}\u{c}<CR>\u{e}\u{f}\u{14}\u{15}\u{1a}\u{1b}\u{7f} 102"
+        );
     }
 }

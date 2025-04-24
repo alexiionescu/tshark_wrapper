@@ -258,7 +258,10 @@ impl ProtocolAnalyzer for Analyzer {
                             }
                         } else {
                             if expires != 0 {
-                                println!("{output}{status_code:03}/OK      Expires:{expires:4} ( F,{udp_stream:4}) {:<15}",to_addr);
+                                println!(
+                                    "{output}{status_code:03}/OK      Expires:{expires:4} ( F,{udp_stream:4}) {:<15}",
+                                    to_addr
+                                );
                             }
                             self.register_status.insert(
                                 key.0.clone(),

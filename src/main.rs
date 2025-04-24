@@ -1,5 +1,5 @@
 use chrono::{NaiveDateTime, TimeZone as _, Utc};
-use clap::{command, ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand, command};
 use glob::glob;
 use regex::Regex;
 use std::{path::PathBuf, process::Stdio};
