@@ -2,15 +2,19 @@ use chrono::{NaiveDateTime, TimeZone as _, Utc};
 use clap::{ArgAction, Parser, Subcommand, command};
 use glob::glob;
 use regex::Regex;
+use replays::ReplaySender;
 use std::{path::PathBuf, process::Stdio};
 use tokio::{
     io::{AsyncBufReadExt as _, BufReader},
     process::Command,
     signal,
+    sync::broadcast,
+    task,
 };
 use utils::str::MaybeReplaceVecExt as _;
-
+mod replays;
 mod utils;
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -40,6 +44,22 @@ enum ArgsCommand {
         output_regex: Option<Regex>,
         #[clap(short = 't', long, help = "Decoda Data As Text")]
         text: bool,
+        #[clap(long, help = "Replay text to udp address:port")]
+        udp_replay: Option<String>,
+        #[clap(long, help = "Replay min time in milliseconds", default_value = "0")]
+        replay_min_ms: u64,
+        #[clap(
+            long,
+            help = "Replay max time in milliseconds",
+            default_value = "99999999999999"
+        )]
+        replay_max_ms: u64,
+        #[clap(
+            long,
+            help = "Replay time contraction from capture timestamps",
+            default_value = "1"
+        )]
+        replay_contraction: u64,
     },
     Analyzer,
 }
@@ -48,6 +68,13 @@ const FIX_FIELDS: usize = 3;
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let shutdown_tx_clone = shutdown_tx.clone();
+    task::spawn(async move {
+        signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
+        eprintln!("\nCtrl+C received, sending shutdown signal.");
+        shutdown_tx_clone.send(()).ok();
+    });
 
     let mut tshark_args = vec![
         "-Q",
@@ -87,11 +114,17 @@ async fn main() {
         tshark_args.push(d.as_str());
     }
     let mut analyzer = create_analyzer(&args);
+    let mut replayer = replays::create_replay_sender(&args.cmd).await;
     let mut data_field = 0;
     match &args.cmd {
         ArgsCommand::Dump { .. } => {
-            tshark_args.push("-t");
-            tshark_args.push("ad");
+            if replayer.is_some() {
+                tshark_args.push("-t");
+                tshark_args.push("e.6");
+            } else {
+                tshark_args.push("-t");
+                tshark_args.push("ad");
+            }
             data_field = add_dump_protocol_fields(&mut tshark_args, &args);
         }
         ArgsCommand::Analyzer => {
@@ -129,12 +162,13 @@ async fn main() {
 
         let mut lines = BufReader::new(stdout).lines();
 
+        let mut shutdown_rx1 = shutdown_tx.subscribe();
         loop {
             tokio::select! {
                 line = lines.next_line() => {
                     match line {
                         Ok(Some(line)) => {
-                            process_line(line, &args.cmd, &mut analyzer, data_field);
+                            process_line(line, &args.cmd, &mut analyzer,  &mut replayer, data_field).await;
                         }
                         Err(e) => {
                             eprintln!("error reading line: {}", e);
@@ -144,18 +178,37 @@ async fn main() {
                             break;
                         }
                     }
+
                 }
-                _ = signal::ctrl_c() => {
-                    eprintln!("ctrl-c received");
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        process_line(line, &args.cmd, &mut analyzer, data_field);
-                    }
-                    cmd.kill().await.map_err(|e| eprintln!("error killing process: {}", e)).ok();
-                    cmd.wait().await.map_err(|e| eprintln!("error waiting for process: {}", e)).ok();
+                _ = shutdown_rx1.recv() => {
+                    println!("Main Loop shutting down...");
                     break;
                 }
             }
         }
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            process_line(
+                line,
+                &args.cmd,
+                &mut analyzer,
+                &mut None::<replays::udp_replay::UdpReplay>,
+                data_field,
+            )
+            .await;
+        }
+        cmd.kill()
+            .await
+            .map_err(|e| eprintln!("error killing process: {}", e))
+            .ok();
+        cmd.wait()
+            .await
+            .map_err(|e| eprintln!("error waiting for process: {}", e))
+            .ok();
+    }
+
+    if let Some(replayer) = &mut replayer {
+        replayer.end().await;
     }
     if let Some(analyzer) = &mut analyzer {
         analyzer.end();
@@ -223,30 +276,43 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) -> usize {
     }
 }
 
-fn process_line(
+async fn process_line(
     line: String,
     cmd_args: &ArgsCommand,
     analyzer: &mut Option<impl ProtocolAnalyzer>,
+    replayer: &mut Option<impl ReplaySender>,
     data_field: usize,
 ) {
     match cmd_args {
-        ArgsCommand::Dump { output_regex, text } => {
-            let line = if *text && data_field > 0 {
+        ArgsCommand::Dump {
+            output_regex, text, ..
+        } => {
+            let line = if data_field > 0 {
                 let mut split_out = line.split('\t').collect::<Vec<&str>>();
                 if split_out.len() <= data_field {
                     line
                 } else if let Ok(raw_hex) = hex::decode(split_out[data_field]) {
-                    let raw_hex = raw_hex
-                        .maybe_replace_buf(b"\r", b"<CR>")
-                        .maybe_replace_buf(b"\n", b"<LF>")
-                        .maybe_replace_buf(b"\t", b"<TAB>")
-                        .maybe_replace_buf(b"\x00", b"<NUL>")
-                        .maybe_replace_buf(b"\x02", b"<STX>")
-                        .maybe_replace_buf(b"\x03", b"<ETX>")
-                        .maybe_replace_buf(b"\x04", b"<EOT>");
-                    if let Ok(s) = String::from_utf8(raw_hex) {
-                        split_out[data_field] = &s;
-                        split_out.join("\t")
+                    if let Some(replayer) = replayer {
+                        let dt = NaiveDateTime::parse_from_str(split_out[0], "%s.%6f")
+                            .map(|d| Utc.from_utc_datetime(&d))
+                            .unwrap_or_default();
+                        replayer.send(dt, &raw_hex).await;
+                    }
+                    if *text {
+                        let raw_hex = raw_hex
+                            .maybe_replace_buf(b"\r", b"<CR>")
+                            .maybe_replace_buf(b"\n", b"<LF>")
+                            .maybe_replace_buf(b"\t", b"<TAB>")
+                            .maybe_replace_buf(b"\x00", b"<NUL>")
+                            .maybe_replace_buf(b"\x02", b"<STX>")
+                            .maybe_replace_buf(b"\x03", b"<ETX>")
+                            .maybe_replace_buf(b"\x04", b"<EOT>");
+                        if let Ok(s) = String::from_utf8(raw_hex) {
+                            split_out[data_field] = &s;
+                            split_out.join("\t")
+                        } else {
+                            line
+                        }
                     } else {
                         line
                     }
