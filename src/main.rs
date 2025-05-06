@@ -15,6 +15,7 @@ use utils::str::MaybeReplaceVecExt as _;
 mod replays;
 mod utils;
 
+const DATETIME_FMT: &str = "%Y-%m-%d %H:%M:%S.%6f";
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
@@ -292,11 +293,14 @@ async fn process_line(
                 if split_out.len() <= data_field {
                     line
                 } else if let Ok(raw_hex) = hex::decode(split_out[data_field]) {
+                    let time_str;
                     if let Some(replayer) = replayer {
                         let dt = NaiveDateTime::parse_from_str(split_out[0], "%s.%6f")
                             .map(|d| Utc.from_utc_datetime(&d))
                             .unwrap_or_default();
                         replayer.send(dt, &raw_hex).await;
+                        time_str = format!("{}", dt.format(DATETIME_FMT));
+                        split_out[0] = &time_str;
                     }
                     if *text {
                         let raw_hex = raw_hex
