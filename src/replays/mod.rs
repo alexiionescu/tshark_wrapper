@@ -19,5 +19,6 @@ where
 {
     async fn new(cmd_args: &ArgsCommand) -> Option<Self>;
     async fn send(&mut self, ts: DateTime<Utc>, data: &[u8]);
+    fn reset_sleep_time(&mut self) -> u64;
     async fn end(&mut self);
 }

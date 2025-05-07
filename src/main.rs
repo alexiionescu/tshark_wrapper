@@ -45,7 +45,7 @@ enum ArgsCommand {
         output_regex: Option<Regex>,
         #[clap(short = 't', long, help = "Decoda Data As Text")]
         text: bool,
-        #[clap(long, help = "Replay text to udp address:port")]
+        #[clap(long, help = "Replay data to udp address:port")]
         udp_replay: Option<String>,
         #[clap(long, help = "Replay min time in milliseconds", default_value = "0")]
         replay_min_ms: u64,
@@ -119,13 +119,9 @@ async fn main() {
     let mut data_field = 0;
     match &args.cmd {
         ArgsCommand::Dump { .. } => {
-            if replayer.is_some() {
-                tshark_args.push("-t");
-                tshark_args.push("e.6");
-            } else {
-                tshark_args.push("-t");
-                tshark_args.push("ad");
-            }
+            tshark_args.push("-t");
+            tshark_args.push("ad");
+
             data_field = add_dump_protocol_fields(&mut tshark_args, &args);
         }
         ArgsCommand::Analyzer => {
@@ -293,14 +289,11 @@ async fn process_line(
                 if split_out.len() <= data_field {
                     line
                 } else if let Ok(raw_hex) = hex::decode(split_out[data_field]) {
-                    let time_str;
                     if let Some(replayer) = replayer {
-                        let dt = NaiveDateTime::parse_from_str(split_out[0], "%s.%6f")
+                        let dt = NaiveDateTime::parse_from_str(split_out[0], DATETIME_FMT)
                             .map(|d| Utc.from_utc_datetime(&d))
                             .unwrap_or_default();
                         replayer.send(dt, &raw_hex).await;
-                        time_str = format!("{}", dt.format(DATETIME_FMT));
-                        split_out[0] = &time_str;
                     }
                     if *text {
                         let raw_hex = raw_hex
@@ -328,9 +321,15 @@ async fn process_line(
             };
             if let Some(re) = output_regex {
                 if re.is_match(&line) {
+                    if let Some(replayer) = replayer {
+                        print!("Δ{:10} ms ", replayer.reset_sleep_time());
+                    }
                     println!("{}", line);
                 }
             } else {
+                if let Some(replayer) = replayer {
+                    print!("Δ{:10} ms ", replayer.reset_sleep_time());
+                }
                 println!("{}", line);
             }
         }

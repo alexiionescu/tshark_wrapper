@@ -13,6 +13,7 @@ pub struct UdpReplay {
     replay_min_ms: u64,
     replay_max_ms: u64,
     last_ts: Option<DateTime<Utc>>,
+    sleep_time: u64,
 }
 
 impl ReplaySender for UdpReplay {
@@ -33,6 +34,7 @@ impl ReplaySender for UdpReplay {
                 replay_min_ms: *replay_min_ms,
                 replay_max_ms: *replay_max_ms,
                 last_ts: None,
+                sleep_time: 0,
             });
         }
         None
@@ -55,6 +57,12 @@ impl ReplaySender for UdpReplay {
             tokio::time::sleep(tokio::time::Duration::from_millis(sleep_time)).await;
         }
         self.socket.send(data).await.ok();
+        self.sleep_time += sleep_time;
+    }
+    fn reset_sleep_time(&mut self) -> u64 {
+        let sleep_time = self.sleep_time;
+        self.sleep_time = 0;
+        sleep_time
     }
     async fn end(&mut self) {}
 }
