@@ -190,6 +190,7 @@ impl ProtocolAnalyzer for Analyzer {
             .zip(cols[17].split(','))
             .filter(|(codec, _)| codec != &"telephone-event")
             .collect::<Vec<_>>();
+        let media_formats = cols[18].to_owned();
         let mut output = String::with_capacity(200);
         self.verified_expired_sessions(ts);
         if self.last_reported_ts.is_none() {
@@ -472,10 +473,14 @@ impl ProtocolAnalyzer for Analyzer {
                     write!(
                         output,
                         " MEDIA {sdp_addr}:{sdp_port}\t{}",
-                        media_codecs
-                            .iter()
-                            .map(|(codec, rate)| format!("{}/{}", codec, rate))
-                            .join(", ")
+                        if media_codecs.is_empty() {
+                            media_formats
+                        } else {
+                            media_codecs
+                                .iter()
+                                .map(|(codec, rate)| format!("{}/{}", codec, rate))
+                                .join(", ")
+                        }
                     )
                     .unwrap();
                 }
@@ -525,6 +530,8 @@ impl ProtocolAnalyzer for Analyzer {
         tshark_args.push("sdp.mime.type");
         tshark_args.push("-e");
         tshark_args.push("sdp.sample_rate");
+        tshark_args.push("-e");
+        tshark_args.push("sdp.media.format");
         if !tshark_args.contains(&"-Y") {
             tshark_args.push("-Y");
             tshark_args.push("sip");
