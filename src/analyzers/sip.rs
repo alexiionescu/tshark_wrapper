@@ -2,6 +2,7 @@ use super::ProtocolAnalyzer;
 use crate::ArgsCommand;
 use ahash::HashMap;
 use chrono::{DateTime, Datelike, Local, Utc};
+use itertools::Itertools;
 use std::fmt::Write as _;
 
 struct RegRequest {
@@ -184,6 +185,11 @@ impl ProtocolAnalyzer for Analyzer {
         let from_display = cols[13];
         let udp_stream = cols[14].parse::<u32>().unwrap_or_default();
         let auth_user = cols[15];
+        let media_codecs = cols[16]
+            .split(',')
+            .zip(cols[17].split(','))
+            .filter(|(codec, _)| codec != &"telephone-event")
+            .collect::<Vec<_>>();
         let mut output = String::with_capacity(200);
         self.verified_expired_sessions(ts);
         if self.last_reported_ts.is_none() {
@@ -463,7 +469,15 @@ impl ProtocolAnalyzer for Analyzer {
                     write!(output, " From: {from_display}").unwrap();
                 }
                 if !sdp_addr.is_empty() {
-                    write!(output, " MEDIA {sdp_addr}:{sdp_port} ").unwrap();
+                    write!(
+                        output,
+                        " MEDIA {sdp_addr}:{sdp_port}\t{}",
+                        media_codecs
+                            .iter()
+                            .map(|(codec, rate)| format!("{}/{}", codec, rate))
+                            .join(", ")
+                    )
+                    .unwrap();
                 }
                 println!("{output}");
             }
@@ -507,6 +521,10 @@ impl ProtocolAnalyzer for Analyzer {
         tshark_args.push("udp.stream");
         tshark_args.push("-e");
         tshark_args.push("sip.auth.username");
+        tshark_args.push("-e");
+        tshark_args.push("sdp.mime.type");
+        tshark_args.push("-e");
+        tshark_args.push("sdp.sample_rate");
         if !tshark_args.contains(&"-Y") {
             tshark_args.push("-Y");
             tshark_args.push("sip");
