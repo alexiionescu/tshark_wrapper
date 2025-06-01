@@ -43,6 +43,8 @@ enum ArgsCommand {
     Dump {
         #[clap(short = 'e', long, help = "Regex for filtering output lines")]
         output_regex: Option<Regex>,
+        #[clap(short = 'j', long, help = "Decoda Data As Text")]
+        json: bool,
         #[clap(short = 't', long, help = "Decoda Data As Text")]
         text: bool,
         #[clap(long, help = "Replay data to udp address:port")]
@@ -118,11 +120,11 @@ async fn main() {
     let mut replayer = replays::create_replay_sender(&args.cmd).await;
     let mut data_field = 0;
     match &args.cmd {
-        ArgsCommand::Dump { .. } => {
+        ArgsCommand::Dump { json, .. } => {
             tshark_args.push("-t");
             tshark_args.push("ad");
 
-            data_field = add_dump_protocol_fields(&mut tshark_args, &args);
+            data_field = add_dump_protocol_fields(&mut tshark_args, &args, *json);
         }
         ArgsCommand::Analyzer => {
             if let Some(analyzer) = &analyzer {
@@ -212,7 +214,7 @@ async fn main() {
     }
 }
 
-fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) -> usize {
+fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args, json: bool) -> usize {
     if let Some(protocol) = args.protocol.as_deref() {
         match protocol {
             "tcp" => {
@@ -223,8 +225,13 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) -> usize {
                 tshark_args.push("-e");
                 tshark_args.push("_ws.col.Info");
                 tshark_args.push("-e");
-                tshark_args.push("data");
-                FIX_FIELDS + 3
+                if json {
+                    tshark_args.push("json.path_with_value");
+                    0
+                } else {
+                    tshark_args.push("data");
+                    FIX_FIELDS + 3
+                }
             }
             "udp" => {
                 tshark_args.push("-e");
@@ -232,8 +239,13 @@ fn add_dump_protocol_fields(tshark_args: &mut Vec<&str>, args: &Args) -> usize {
                 tshark_args.push("-e");
                 tshark_args.push("udp.dstport");
                 tshark_args.push("-e");
-                tshark_args.push("data");
-                FIX_FIELDS + 2
+                if json {
+                    tshark_args.push("json.path_with_value");
+                    0
+                } else {
+                    tshark_args.push("data");
+                    FIX_FIELDS + 2
+                }
             }
             "sip" => {
                 tshark_args.push("-e");
