@@ -131,9 +131,9 @@ impl Analyzer {
                 )
                 .unwrap();
             }
-            println!("{}", output);
+            println!("{output}");
             if self.verbosity > 1 {
-                eprintln!("{}", output);
+                eprintln!("{output}");
             }
             output.clear();
         }
@@ -150,9 +150,9 @@ impl Analyzer {
             self.register_status.len() - registered,
         )
         .unwrap();
-        print!("{}", output);
+        print!("{output}");
         if self.verbosity > 0 {
-            eprint!("{}", output);
+            eprint!("{output}");
         }
         println!("----------------------------------\n");
         if self.verbosity > 1 {
@@ -266,8 +266,7 @@ impl ProtocolAnalyzer for Analyzer {
                         } else {
                             if expires != 0 {
                                 println!(
-                                    "{output}{status_code:03}/OK      Expires:{expires:4} ( F,{udp_stream:4}) {:<15}",
-                                    to_addr
+                                    "{output}{status_code:03}/OK      Expires:{expires:4} ( F,{udp_stream:4}) {to_addr:<15}"
                                 );
                             }
                             self.register_status.insert(
@@ -478,7 +477,7 @@ impl ProtocolAnalyzer for Analyzer {
                         } else {
                             media_codecs
                                 .iter()
-                                .map(|(codec, rate)| format!("{}/{}", codec, rate))
+                                .map(|(codec, rate)| format!("{codec}/{rate}"))
                                 .join(", ")
                         }
                     )

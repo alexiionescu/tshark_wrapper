@@ -34,6 +34,8 @@ struct Args {
     protocol: Option<String>,
     #[clap(short = 'v', action = ArgAction::Count, help = "verbosity level (e.g. -vvv)")]
     verbosity: u8,
+    #[clap(long, help = "Disable Profile Protocols decode")]
+    disable_protocol: Option<String>,
 }
 
 mod analyzers;
@@ -116,6 +118,10 @@ async fn main() {
         tshark_args.push("-d");
         tshark_args.push(d.as_str());
     }
+    if let Some(disable_protocol) = args.disable_protocol.as_ref() {
+        tshark_args.push("--disable-protocol");
+        tshark_args.push(disable_protocol);
+    }
     let mut analyzer = create_analyzer(&args);
     let mut replayer = replays::create_replay_sender(&args.cmd).await;
     let mut data_field = 0;
@@ -170,7 +176,7 @@ async fn main() {
                             process_line(line, &args.cmd, &mut analyzer,  &mut replayer, data_field).await;
                         }
                         Err(e) => {
-                            eprintln!("error reading line: {}", e);
+                            eprintln!("error reading line: {e}");
                             break;
                         }
                         _ => {
@@ -198,11 +204,11 @@ async fn main() {
         }
         cmd.kill()
             .await
-            .map_err(|e| eprintln!("error killing process: {}", e))
+            .map_err(|e| eprintln!("error killing process: {e}"))
             .ok();
         cmd.wait()
             .await
-            .map_err(|e| eprintln!("error waiting for process: {}", e))
+            .map_err(|e| eprintln!("error waiting for process: {e}"))
             .ok();
     }
 
@@ -336,13 +342,13 @@ async fn process_line(
                     if let Some(replayer) = replayer {
                         print!("Δ{:10} ms ", replayer.reset_sleep_time());
                     }
-                    println!("{}", line);
+                    println!("{line}");
                 }
             } else {
                 if let Some(replayer) = replayer {
                     print!("Δ{:10} ms ", replayer.reset_sleep_time());
                 }
-                println!("{}", line);
+                println!("{line}");
             }
         }
         ArgsCommand::Analyzer => analyze_line(&line, cmd_args, analyzer),

@@ -112,7 +112,7 @@ mod test {
     fn test_replace_data() {
         let t = "023130320d0a000000313032030405060708090a0b0c0d0e0f14151A1B7F20313032";
         let a = hex::decode(t).expect("decode hex ok");
-        println!("{:?}", a);
+        println!("{a:?}");
         let a = a
             .maybe_replace_buf(b"\r", b"<CR>")
             .maybe_replace_buf(b"\t", b"<TAB>")
